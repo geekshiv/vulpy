@@ -55,7 +55,7 @@ jobs:
           trivy fs . --format json --output trivy-report.json --exit-code 0
 
       # -----------------------------------------------------------
-      # 5. GENERATE UNIFIED DASHBOARD
+      # 5. GENERATE SMART DASHBOARD
       # -----------------------------------------------------------
       - name: Generate Dashboard
         if: always()
@@ -66,27 +66,25 @@ jobs:
 
           summary_content = "# 🛡️ Security Scan Report\n\n"
           
-          # --- LOAD DATA ---
+          # Initialize data
           gitleaks_data = []
           semgrep_data = []
           bandit_data = []
           trivy_data = []
 
-          # 1. Gitleaks
+          # --- LOAD DATA ---
           if os.path.exists("gitleaks-report.json"):
               try:
                   with open("gitleaks-report.json") as f:
                       gitleaks_data = json.load(f)
               except: pass
 
-          # 2. Semgrep
           if os.path.exists("semgrep-report.json"):
               try:
                   with open("semgrep-report.json") as f:
                       semgrep_data = json.load(f).get('results', [])
               except: pass
 
-          # 3. Bandit (New!)
           if os.path.exists("bandit-report.json"):
               try:
                   with open("bandit-report.json") as f:
@@ -94,7 +92,6 @@ jobs:
                       bandit_data = data.get('results', [])
               except: pass
 
-          # 4. Trivy
           if os.path.exists("trivy-report.json"):
               try:
                   with open("trivy-report.json") as f:
@@ -109,19 +106,66 @@ jobs:
                               })
               except: pass
 
-          # --- COMBINE SAST ---
-          total_sast_count = len(semgrep_data) + len(bandit_data)
-          
-          # Icons
+          # --- COMBINE & CLEAN SAST ---
+          # Logic: If Semgrep finds an ERROR on file:line, ignore WARNINGs on same file:line
+          sast_findings = []
+          error_locations = set()
+
+          # 1. Process Semgrep Errors first to build exclusion list
+          for s in semgrep_data:
+              sev = s.get('extra', {}).get('severity', 'UNKNOWN')
+              if sev == "ERROR":
+                  path = s.get('path', '?')
+                  line = s.get('start', {}).get('line', '?')
+                  error_locations.add(f"{path}:{line}")
+
+          # 2. Add Semgrep Findings (Skipping Warnings if Error exists)
+          for s in semgrep_data:
+              path = s.get('path', '?')
+              line = s.get('start', {}).get('line', '?')
+              sev = s.get('extra', {}).get('severity', 'UNKNOWN')
+              rule_id = s.get('check_id', '?').split('.')[-1] # Short name
+              msg = s.get('extra', {}).get('message', '').split('.')[0] # Short msg
+              
+              # Skip WARNING if ERROR exists on same line
+              if sev != "ERROR" and f"{path}:{line}" in error_locations:
+                  continue
+
+              icon = "🔴" if sev == "ERROR" else "🟠" # Fixed Typo
+              sast_findings.append({
+                  'tool': 'Semgrep',
+                  'icon': icon,
+                  'severity': sev,
+                  'file': path,
+                  'line': line,
+                  'rule': rule_id,
+                  'msg': msg
+              })
+
+          # 3. Add Bandit Findings
+          for b in bandit_data:
+              sev = b.get('issue_severity', 'MEDIUM')
+              icon = "🔴" if sev == "HIGH" else "🟠"
+              sast_findings.append({
+                  'tool': 'Bandit',
+                  'icon': icon,
+                  'severity': sev,
+                  'file': b.get('filename', '?'),
+                  'line': b.get('line_number', '?'),
+                  'rule': b.get('test_id', '?'),
+                  'msg': b.get('issue_text', '?')
+              })
+
+          # --- BUILD HEADER ---
           gl_icon = "🔴" if len(gitleaks_data) > 0 else "✅"
-          sast_icon = "🔴" if total_sast_count > 0 else "✅"
+          sast_icon = "🔴" if any(f['icon'] == "🔴" for f in sast_findings) else "✅"
           tr_icon = "🟠" if len(trivy_data) > 0 else "✅"
 
           summary_content += f"""
           | Category | Status | Issues |
           | :--- | :--- | :---: |
           | **Secrets** | {gl_icon} | {len(gitleaks_data)} |
-          | **Code (SAST)** | {sast_icon} | {total_sast_count} |
+          | **Code (SAST)** | {sast_icon} | {len(sast_findings)} |
           | **Deps (SCA)** | {tr_icon} | {len(trivy_data)} |
           
           ---
@@ -144,26 +188,16 @@ jobs:
                   summary_content += f"| **🔴 CRITICAL** | `{s.get('File', '?')}` | {s.get('StartLine', '?')} | `{safe_match}` |\n"
               summary_content += "</details>\n\n"
 
-          # SAST (Combined Bandit + Semgrep)
-          if total_sast_count > 0:
+          # SAST (Combined)
+          if sast_findings:
               summary_content += f"""
-          <details><summary><strong>🔻 Code Issues ({total_sast_count})</strong></summary>
+          <details><summary><strong>🔻 Code Issues ({len(sast_findings)})</strong></summary>
           
-          | Tool | Severity | File | Line | Issue |
+          | Tool | Severity | File : Line | Rule Name | Message |
           | :--- | :--- | :--- | :--- | :--- |
           """
-              # Add Bandit Rows
-              for b in bandit_data:
-                  sev = b.get('issue_severity', 'MEDIUM')
-                  icon = "🔴" if sev == "HIGH" else "🟠"
-                  summary_content += f"| Bandit | **{icon} {sev}** | `{b.get('filename', '?')}` | {b.get('line_number', '?')} | {b.get('issue_text', '?')} |\n"
-
-              # Add Semgrep Rows
-              for s in semgrep_data:
-                  sev = s.get('extra', {}).get('severity', 'UNKNOWN')
-                  icon = "🔴" if sev == "ERROR" else "hk"
-                  msg = s.get('extra', {}).get('message', '').replace('\n', ' ')
-                  summary_content += f"| Semgrep | **{icon} {sev}** | `{s.get('path', '?')}` | {s.get('start', {}).get('line', '?')} | {msg} |\n"
+              for f in sast_findings:
+                  summary_content += f"| {f['tool']} | **{f['icon']} {f['severity']}** | `{f['file']}:{f['line']}` | `{f['rule']}` | {f['msg']} |\n"
               
               summary_content += "</details>\n\n"
 
@@ -176,7 +210,7 @@ jobs:
           | :--- | :--- | :--- | :--- |
           """
               for t in trivy_data:
-                  icon = "🔴" if t['severity'] in ["CRITICAL", "HIGH"] else "hk"
+                  icon = "🔴" if t['severity'] in ["CRITICAL", "HIGH"] else "🟠"
                   title = t['title'].replace('|', '-')
                   summary_content += f"| **{icon} {t['severity']}** | `{t['pkg']}` | {title} | {t['id']} |\n"
               summary_content += "</details>\n"
