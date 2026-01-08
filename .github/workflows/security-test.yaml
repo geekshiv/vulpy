@@ -1,4 +1,4 @@
-name: DevSecOps Scan (Semgrep Focused)
+name: DevSecOps Scan
 
 on: [push, pull_request]
 
@@ -25,12 +25,12 @@ jobs:
           ./gitleaks detect -v --source . --report-path gitleaks-report.json --report-format json || true
 
       # -----------------------------------------------------------
-      # 2. SAST SCAN (Semgrep Only - Criticals)
+      # 2. SAST SCAN (Semgrep)
       # -----------------------------------------------------------
       - name: Run Semgrep
         run: |
           pip install semgrep
-          # Using OWASP & Security rulesets for maximum critical coverage
+          # Using specific rulesets to catch Flask/Python issues
           semgrep scan --config=p/owasp-top-ten --config=p/python-security --config=p/flask --json -o semgrep-report.json || true
 
       # -----------------------------------------------------------
@@ -45,7 +45,7 @@ jobs:
           trivy fs . --format json --output trivy-report.json --exit-code 0
 
       # -----------------------------------------------------------
-      # 4. GENERATE CLEAN DASHBOARD
+      # 4. GENERATE DASHBOARD
       # -----------------------------------------------------------
       - name: Generate Dashboard
         if: always()
@@ -54,7 +54,7 @@ jobs:
           import json
           import os
 
-          summary_content = "# 🛡️ Security Scan Report (Criticals Only)\n\n"
+          summary_content = "# 🛡️ Security Scan Report\n\n"
           
           # Initialize data
           gitleaks_data = []
@@ -88,34 +88,40 @@ jobs:
                               })
               except: pass
 
-          # --- FILTER & PROCESS SAST (STRICT) ---
+          # --- PROCESS SAST (Semgrep) ---
           sast_findings = []
 
           for s in semgrep_data:
               sev = s.get('extra', {}).get('severity', 'UNKNOWN')
-              # STRICT FILTER: Show only ERROR (High/Critical)
-              if sev == "ERROR":
+              
+              # FILTER: Ignore INFO, keep ERROR and WARNING
+              if sev in ["ERROR", "WARNING"]:
                   path = s.get('path', '?')
                   line = s.get('start', {}).get('line', '?')
                   
-                  # CLEAN NAME LOGIC:
-                  # 1. Get the last part of the check_id (e.g. 'sqlalchemy-execute-raw-query')
-                  # 2. Replace dashes with spaces
-                  # 3. Capitalize words
+                  # CLEAN NAME LOGIC
+                  # Ex: python.flask.security.xss -> "Xss"
+                  # Ex: python.sqlalchemy.injection -> "Injection"
                   raw_id = s.get('check_id', '?').split('.')[-1]
                   clean_name = raw_id.replace('-', ' ').title()
                   
-                  # Shorten message for display
+                  # MAPPING
+                  display_sev = "CRITICAL" if sev == "ERROR" else "HIGH"
+                  icon = "🔴" if sev == "ERROR" else "🟠"
+                  
+                  # Shorten message
                   msg = s.get('extra', {}).get('message', '').split('.')[0]
                   
                   sast_findings.append({
                       'file': path,
                       'line': line,
-                      'name': clean_name, # "Sqlalchemy Execute Raw Query"
+                      'name': clean_name, 
+                      'severity': display_sev,
+                      'icon': icon,
                       'msg': msg
                   })
 
-          # --- FILTER TRIVY (CRITICAL ONLY) ---
+          # --- PROCESS TRIVY ---
           trivy_criticals = [t for t in trivy_data if t['severity'] in ["CRITICAL", "HIGH"]]
 
           # --- BUILD HEADER ---
@@ -128,7 +134,7 @@ jobs:
           tr_icon = "🔴" if tr_count > 0 else "✅"
 
           summary_content += f"""
-          | Category | Status | Critical Issues |
+          | Category | Status | Vulnerabilities |
           | :--- | :--- | :---: |
           | **Secrets** | {gl_icon} | {gl_count} |
           | **Code (Semgrep)** | {sast_icon} | {sast_count} |
@@ -142,7 +148,7 @@ jobs:
           # GITLEAKS
           if gitleaks_data:
               summary_content += f"""
-          <details open><summary><strong>🔻 Secrets Details ({gl_count})</strong></summary>
+          <details open><summary><strong>🔻 Secrets ({gl_count})</strong></summary>
           
           | File | Line | Variable / Match |
           | :--- | :--- | :--- |
@@ -157,20 +163,20 @@ jobs:
           # SAST (SEMGREP)
           if sast_findings:
               summary_content += f"""
-          <details open><summary><strong>🔻 Code Criticals ({sast_count})</strong></summary>
+          <details open><summary><strong>🔻 Code Vulnerabilities ({sast_count})</strong></summary>
           
-          | File : Line | Vulnerability | Details |
-          | :--- | :--- | :--- |
+          | Severity | Vulnerability | File : Line | Details |
+          | :--- | :--- | :--- | :--- |
           """
               for f in sast_findings:
-                  summary_content += f"| `{f['file']}:{f['line']}` | **{f['name']}** | {f['msg']} |\n"
+                  summary_content += f"| **{f['icon']} {f['severity']}** | **{f['name']}** | `{f['file']}:{f['line']}` | {f['msg']} |\n"
               
               summary_content += "</details>\n\n"
 
           # TRIVY
           if trivy_criticals:
               summary_content += f"""
-          <details open><summary><strong>🔻 Vulnerable Deps ({tr_count})</strong></summary>
+          <details open><summary><strong>🔻 Dependency Vulns ({tr_count})</strong></summary>
           
           | Severity | Package | Vuln Name | ID |
           | :--- | :--- | :--- | :--- |
@@ -182,7 +188,7 @@ jobs:
               summary_content += "</details>\n"
 
           if gl_count == 0 and sast_count == 0 and tr_count == 0:
-              summary_content += "\n### 🎉 Clean Run! No critical vulnerabilities detected."
+              summary_content += "\n### 🎉 Clean Run! No critical/high vulnerabilities detected."
 
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(summary_content)
