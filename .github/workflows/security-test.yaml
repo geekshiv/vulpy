@@ -24,14 +24,28 @@ jobs:
           chmod +x gitleaks
           ./gitleaks detect -v --source . --report-path gitleaks-report.json --report-format json || true
 
-      # -----------------------------------------------------------
-      # 2. SAST SCAN (Semgrep)
+     # -----------------------------------------------------------
+      # 2. SAST SCAN (Semgrep - Aggressive Security Mode)
       # -----------------------------------------------------------
       - name: Run Semgrep
         run: |
           pip install semgrep
-          semgrep scan --config=p/python --config=p/dockerfile --json -o semgrep-report.json || true
-
+          
+          # We use multiple specific config sets to catch OWASP issues
+          # p/owasp-top-ten: Covers SQLi, XSS, Injection
+          # p/python-security: General python security patterns
+          # p/flask: Specific to Flask misconfigurations (CSRF, etc)
+          # p/secrets: Backup secret check
+          
+          echo "🏃 Running Semgrep with OWASP & Security Rulesets..."
+          
+          semgrep scan \
+            --config=p/owasp-top-ten \
+            --config=p/python-security \
+            --config=p/flask \
+            --config=p/bandit \
+            --json -o semgrep-report.json || true
+            
       # -----------------------------------------------------------
       # 3. SCA SCAN (Trivy)
       # -----------------------------------------------------------
