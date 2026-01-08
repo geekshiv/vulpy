@@ -1,4 +1,4 @@
-name: DevSecOps Scan (Dual Engine)
+name: DevSecOps Scan (Semgrep Focused)
 
 on: [push, pull_request]
 
@@ -25,26 +25,16 @@ jobs:
           ./gitleaks detect -v --source . --report-path gitleaks-report.json --report-format json || true
 
       # -----------------------------------------------------------
-      # 2. SAST PART A: BANDIT (The Heavy Hitter)
-      # -----------------------------------------------------------
-      # - name: Run Bandit (Python Security)
-      #   run: |
-      #     pip install bandit
-      #     # -r: recursive, -f json: format, -o: output
-      #     # || true prevents pipeline failure
-      #     bandit -r . -f json -o bandit-report.json || true
-
-      # -----------------------------------------------------------
-      # 3. SAST PART B: SEMGREP (Modern Rules)
+      # 2. SAST SCAN (Semgrep Only - Criticals)
       # -----------------------------------------------------------
       - name: Run Semgrep
         run: |
           pip install semgrep
-          # We revert to 'p/default' + 'p/security-audit' for broad coverage
-          semgrep scan --config=p/default --config=p/security-audit --json -o semgrep-report.json || true
+          # Using OWASP & Security rulesets for maximum critical coverage
+          semgrep scan --config=p/owasp-top-ten --config=p/python-security --config=p/flask --json -o semgrep-report.json || true
 
       # -----------------------------------------------------------
-      # 4. SCA SCAN (Trivy)
+      # 3. SCA SCAN (Trivy)
       # -----------------------------------------------------------
       - name: Install Trivy
         run: |
@@ -55,7 +45,7 @@ jobs:
           trivy fs . --format json --output trivy-report.json --exit-code 0
 
       # -----------------------------------------------------------
-      # 5. GENERATE SMART DASHBOARD
+      # 4. GENERATE CLEAN DASHBOARD
       # -----------------------------------------------------------
       - name: Generate Dashboard
         if: always()
@@ -64,12 +54,11 @@ jobs:
           import json
           import os
 
-          summary_content = "# 🛡️ Security Scan Report\n\n"
+          summary_content = "# 🛡️ Security Scan Report (Criticals Only)\n\n"
           
           # Initialize data
           gitleaks_data = []
           semgrep_data = []
-          bandit_data = []
           trivy_data = []
 
           # --- LOAD DATA ---
@@ -83,13 +72,6 @@ jobs:
               try:
                   with open("semgrep-report.json") as f:
                       semgrep_data = json.load(f).get('results', [])
-              except: pass
-
-          if os.path.exists("bandit-report.json"):
-              try:
-                  with open("bandit-report.json") as f:
-                      data = json.load(f)
-                      bandit_data = data.get('results', [])
               except: pass
 
           if os.path.exists("trivy-report.json"):
@@ -106,67 +88,51 @@ jobs:
                               })
               except: pass
 
-          # --- COMBINE & CLEAN SAST ---
-          # Logic: If Semgrep finds an ERROR on file:line, ignore WARNINGs on same file:line
+          # --- FILTER & PROCESS SAST (STRICT) ---
           sast_findings = []
-          error_locations = set()
 
-          # 1. Process Semgrep Errors first to build exclusion list
           for s in semgrep_data:
               sev = s.get('extra', {}).get('severity', 'UNKNOWN')
+              # STRICT FILTER: Show only ERROR (High/Critical)
               if sev == "ERROR":
                   path = s.get('path', '?')
                   line = s.get('start', {}).get('line', '?')
-                  error_locations.add(f"{path}:{line}")
+                  
+                  # CLEAN NAME LOGIC:
+                  # 1. Get the last part of the check_id (e.g. 'sqlalchemy-execute-raw-query')
+                  # 2. Replace dashes with spaces
+                  # 3. Capitalize words
+                  raw_id = s.get('check_id', '?').split('.')[-1]
+                  clean_name = raw_id.replace('-', ' ').title()
+                  
+                  # Shorten message for display
+                  msg = s.get('extra', {}).get('message', '').split('.')[0]
+                  
+                  sast_findings.append({
+                      'file': path,
+                      'line': line,
+                      'name': clean_name, # "Sqlalchemy Execute Raw Query"
+                      'msg': msg
+                  })
 
-          # 2. Add Semgrep Findings (Skipping Warnings if Error exists)
-          for s in semgrep_data:
-              path = s.get('path', '?')
-              line = s.get('start', {}).get('line', '?')
-              sev = s.get('extra', {}).get('severity', 'UNKNOWN')
-              rule_id = s.get('check_id', '?').split('.')[-1] # Short name
-              msg = s.get('extra', {}).get('message', '').split('.')[0] # Short msg
-              
-              # Skip WARNING if ERROR exists on same line
-              if sev != "ERROR" and f"{path}:{line}" in error_locations:
-                  continue
-
-              icon = "🔴" if sev == "ERROR" else "🟠" # Fixed Typo
-              sast_findings.append({
-                  'tool': 'Semgrep',
-                  'icon': icon,
-                  'severity': sev,
-                  'file': path,
-                  'line': line,
-                  'rule': rule_id,
-                  'msg': msg
-              })
-
-          # 3. Add Bandit Findings
-          for b in bandit_data:
-              sev = b.get('issue_severity', 'MEDIUM')
-              icon = "🔴" if sev == "HIGH" else "🟠"
-              sast_findings.append({
-                  'tool': 'Bandit',
-                  'icon': icon,
-                  'severity': sev,
-                  'file': b.get('filename', '?'),
-                  'line': b.get('line_number', '?'),
-                  'rule': b.get('test_id', '?'),
-                  'msg': b.get('issue_text', '?')
-              })
+          # --- FILTER TRIVY (CRITICAL ONLY) ---
+          trivy_criticals = [t for t in trivy_data if t['severity'] in ["CRITICAL", "HIGH"]]
 
           # --- BUILD HEADER ---
-          gl_icon = "🔴" if len(gitleaks_data) > 0 else "✅"
-          sast_icon = "🔴" if any(f['icon'] == "🔴" for f in sast_findings) else "✅"
-          tr_icon = "🟠" if len(trivy_data) > 0 else "✅"
+          gl_count = len(gitleaks_data)
+          sast_count = len(sast_findings)
+          tr_count = len(trivy_criticals)
+          
+          gl_icon = "🔴" if gl_count > 0 else "✅"
+          sast_icon = "🔴" if sast_count > 0 else "✅"
+          tr_icon = "🔴" if tr_count > 0 else "✅"
 
           summary_content += f"""
-          | Category | Status | Issues |
+          | Category | Status | Critical Issues |
           | :--- | :--- | :---: |
-          | **Secrets** | {gl_icon} | {len(gitleaks_data)} |
-          | **Code (SAST)** | {sast_icon} | {len(sast_findings)} |
-          | **Deps (SCA)** | {tr_icon} | {len(trivy_data)} |
+          | **Secrets** | {gl_icon} | {gl_count} |
+          | **Code (Semgrep)** | {sast_icon} | {sast_count} |
+          | **Deps (Trivy)** | {tr_icon} | {tr_count} |
           
           ---
           """
@@ -176,44 +142,47 @@ jobs:
           # GITLEAKS
           if gitleaks_data:
               summary_content += f"""
-          <details><summary><strong>🔻 Secrets Details ({len(gitleaks_data)})</strong></summary>
+          <details open><summary><strong>🔻 Secrets Details ({gl_count})</strong></summary>
           
-          | Severity | File | Line | Variable |
-          | :--- | :--- | :--- | :--- |
+          | File | Line | Variable / Match |
+          | :--- | :--- | :--- |
           """
               for s in gitleaks_data:
                   raw_match = s.get('Match', '')
                   safe_match = (raw_match[:20] + '...') if len(raw_match) > 20 else raw_match
                   safe_match = safe_match.replace('|', '\|')
-                  summary_content += f"| **🔴 CRITICAL** | `{s.get('File', '?')}` | {s.get('StartLine', '?')} | `{safe_match}` |\n"
+                  summary_content += f"| `{s.get('File', '?')}` | {s.get('StartLine', '?')} | `{safe_match}` |\n"
               summary_content += "</details>\n\n"
 
-          # SAST (Combined)
+          # SAST (SEMGREP)
           if sast_findings:
               summary_content += f"""
-          <details><summary><strong>🔻 Code Issues ({len(sast_findings)})</strong></summary>
+          <details open><summary><strong>🔻 Code Criticals ({sast_count})</strong></summary>
           
-          | Tool | Severity | File : Line | Rule Name | Message |
-          | :--- | :--- | :--- | :--- | :--- |
+          | File : Line | Vulnerability | Details |
+          | :--- | :--- | :--- |
           """
               for f in sast_findings:
-                  summary_content += f"| {f['tool']} | **{f['icon']} {f['severity']}** | `{f['file']}:{f['line']}` | `{f['rule']}` | {f['msg']} |\n"
+                  summary_content += f"| `{f['file']}:{f['line']}` | **{f['name']}** | {f['msg']} |\n"
               
               summary_content += "</details>\n\n"
 
           # TRIVY
-          if trivy_data:
+          if trivy_criticals:
               summary_content += f"""
-          <details><summary><strong>🔻 Vulnerable Dependencies ({len(trivy_data)})</strong></summary>
+          <details open><summary><strong>🔻 Vulnerable Deps ({tr_count})</strong></summary>
           
           | Severity | Package | Vuln Name | ID |
           | :--- | :--- | :--- | :--- |
           """
-              for t in trivy_data:
-                  icon = "🔴" if t['severity'] in ["CRITICAL", "HIGH"] else "🟠"
+              for t in trivy_criticals:
+                  icon = "🔴" if t['severity'] == "CRITICAL" else "🟠"
                   title = t['title'].replace('|', '-')
                   summary_content += f"| **{icon} {t['severity']}** | `{t['pkg']}` | {title} | {t['id']} |\n"
               summary_content += "</details>\n"
+
+          if gl_count == 0 and sast_count == 0 and tr_count == 0:
+              summary_content += "\n### 🎉 Clean Run! No critical vulnerabilities detected."
 
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(summary_content)
