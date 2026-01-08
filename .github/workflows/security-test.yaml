@@ -1,0 +1,152 @@
+name: DevSecOps Scan (Summary Only)
+
+on: [push, pull_request]
+
+jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+    name: Security Audit
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -----------------------------------------------------------
+      # 1. SECRET SCAN (Gitleaks)
+      # -----------------------------------------------------------
+      - name: Run Gitleaks
+        run: |
+          curl -sS -L https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz -o gitleaks.tar.gz
+          tar -xf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          ./gitleaks detect -v --source . --report-path gitleaks-report.json --report-format json || true
+
+      # -----------------------------------------------------------
+      # 2. SAST SCAN (Semgrep)
+      # -----------------------------------------------------------
+      - name: Run Semgrep
+        run: |
+          pip install semgrep
+          # Output JSON for parsing
+          semgrep scan --config=p/python --config=p/dockerfile --json -o semgrep-report.json || true
+
+      # -----------------------------------------------------------
+      # 3. SCA SCAN (Trivy)
+      # -----------------------------------------------------------
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      
+      - name: Trivy Scan
+        run: |
+          trivy fs . --format json --output trivy-report.json --exit-code 0
+
+      # -----------------------------------------------------------
+      # 4. GENERATE INTERACTIVE DASHBOARD
+      # -----------------------------------------------------------
+      - name: Generate Dashboard
+        if: always()
+        shell: python
+        run: |
+          import json
+          import os
+
+          summary_content = "# 🛡️ Security Scan Report\n\n"
+          
+          # Initialize data
+          gitleaks_data = []
+          semgrep_data = []
+          trivy_data = []
+
+          # --- LOAD DATA ---
+          if os.path.exists("gitleaks-report.json"):
+              try:
+                  with open("gitleaks-report.json") as f:
+                      gitleaks_data = json.load(f)
+              except: pass
+
+          if os.path.exists("semgrep-report.json"):
+              try:
+                  with open("semgrep-report.json") as f:
+                      semgrep_data = json.load(f).get('results', [])
+              except: pass
+
+          if os.path.exists("trivy-report.json"):
+              try:
+                  with open("trivy-report.json") as f:
+                      data = json.load(f)
+                      for result in data.get('Results', []):
+                          for v in result.get('Vulnerabilities', []):
+                              trivy_data.append({
+                                  'pkg': v.get('PkgName', 'unknown'),
+                                  'id': v.get('VulnerabilityID', 'unknown'),
+                                  'severity': v.get('Severity', 'UNKNOWN'),
+                                  'target': result.get('Target', 'unknown')
+                              })
+              except: pass
+
+          # --- BUILD EXECUTIVE SUMMARY ---
+          gl_icon = "🔴" if len(gitleaks_data) > 0 else "✅"
+          sg_icon = "🟠" if len(semgrep_data) > 0 else "✅"
+          tr_icon = "🟠" if len(trivy_data) > 0 else "✅"
+
+          summary_content += f"""
+          | Category | Status | Issues |
+          | :--- | :--- | :---: |
+          | **Secrets** | {gl_icon} | {len(gitleaks_data)} |
+          | **Code (SAST)** | {sg_icon} | {len(semgrep_data)} |
+          | **Deps (SCA)** | {tr_icon} | {len(trivy_data)} |
+          
+          ---
+          """
+
+          # --- BUILD DETAILED SECTIONS ---
+          
+          # 1. Gitleaks Details
+          if gitleaks_data:
+              summary_content += f"""
+          <details>
+          <summary><strong>🔻 Secrets Details ({len(gitleaks_data)})</strong></summary>
+          
+          | File | Line | Secret Type |
+          | :--- | :--- | :--- |
+          """
+              for s in gitleaks_data:
+                  summary_content += f"| `{s.get('File', '?')}` | {s.get('StartLine', '?')} | {s.get('Description', '?')} |\n"
+              summary_content += "</details>\n\n"
+
+          # 2. Semgrep Details
+          if semgrep_data:
+              summary_content += f"""
+          <details>
+          <summary><strong>🔻 Code Issues ({len(semgrep_data)})</strong></summary>
+          
+          | File | Line | Message |
+          | :--- | :--- | :--- |
+          """
+              for s in semgrep_data:
+                  path = s.get('path', '?')
+                  line = s.get('start', {}).get('line', '?')
+                  msg = s.get('extra', {}).get('message', '').replace('\n', ' ')
+                  summary_content += f"| `{path}` | {line} | {msg} |\n"
+              summary_content += "</details>\n\n"
+
+          # 3. Trivy Details
+          if trivy_data:
+              summary_content += f"""
+          <details>
+          <summary><strong>🔻 Vulnerable Dependencies ({len(trivy_data)})</strong></summary>
+          
+          | Package | Severity | ID | Location |
+          | :--- | :--- | :--- | :--- |
+          """
+              for t in trivy_data:
+                  summary_content += f"| `{t['pkg']}` | **{t['severity']}** | {t['id']} | {t['target']} |\n"
+              summary_content += "</details>\n"
+
+          # Write to GitHub Summary
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write(summary_content)
