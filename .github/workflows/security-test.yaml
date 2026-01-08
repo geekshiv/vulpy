@@ -1,4 +1,4 @@
-name: DevSecOps Scan (Summary Only)
+name: DevSecOps Scan 
 
 on: [push, pull_request]
 
@@ -22,6 +22,7 @@ jobs:
           curl -sS -L https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz -o gitleaks.tar.gz
           tar -xf gitleaks.tar.gz gitleaks
           chmod +x gitleaks
+          # Generate JSON report
           ./gitleaks detect -v --source . --report-path gitleaks-report.json --report-format json || true
 
       # -----------------------------------------------------------
@@ -45,7 +46,7 @@ jobs:
           trivy fs . --format json --output trivy-report.json --exit-code 0
 
       # -----------------------------------------------------------
-      # 4. GENERATE INTERACTIVE DASHBOARD
+      # 4. GENERATE DETAILED DASHBOARD
       # -----------------------------------------------------------
       - name: Generate Dashboard
         if: always()
@@ -82,13 +83,15 @@ jobs:
                           for v in result.get('Vulnerabilities', []):
                               trivy_data.append({
                                   'pkg': v.get('PkgName', 'unknown'),
+                                  'version': v.get('InstalledVersion', '?'),
                                   'id': v.get('VulnerabilityID', 'unknown'),
+                                  'title': v.get('Title', 'No description available'), # <--- Added Title
                                   'severity': v.get('Severity', 'UNKNOWN'),
                                   'target': result.get('Target', 'unknown')
                               })
               except: pass
 
-          # --- BUILD EXECUTIVE SUMMARY ---
+          # --- BUILD SUMMARY HEADER ---
           gl_icon = "🔴" if len(gitleaks_data) > 0 else "✅"
           sg_icon = "🟠" if len(semgrep_data) > 0 else "✅"
           tr_icon = "🟠" if len(trivy_data) > 0 else "✅"
@@ -103,48 +106,55 @@ jobs:
           ---
           """
 
-          # --- BUILD DETAILED SECTIONS ---
+          # --- BUILD EXPANDABLE TABLES ---
           
-          # 1. Gitleaks Details
+          # 1. Gitleaks Details (Added Match/Variable Column)
           if gitleaks_data:
               summary_content += f"""
           <details>
           <summary><strong>🔻 Secrets Details ({len(gitleaks_data)})</strong></summary>
           
-          | File | Line | Secret Type |
-          | :--- | :--- | :--- |
+          | File | Line | Variable / Match | Type |
+          | :--- | :--- | :--- | :--- |
           """
               for s in gitleaks_data:
-                  summary_content += f"| `{s.get('File', '?')}` | {s.get('StartLine', '?')} | {s.get('Description', '?')} |\n"
+                  # Safety: Truncate match to avoid printing full secret, but show enough to identify variable
+                  raw_match = s.get('Match', '')
+                  safe_match = (raw_match[:20] + '...') if len(raw_match) > 20 else raw_match
+                  safe_match = safe_match.replace('|', '\|') # Escape pipe for markdown table
+                  
+                  summary_content += f"| `{s.get('File', '?')}` | {s.get('StartLine', '?')} | `{safe_match}` | {s.get('RuleID', '?')} |\n"
               summary_content += "</details>\n\n"
 
-          # 2. Semgrep Details
+          # 2. Semgrep Details (Added Rule Name)
           if semgrep_data:
               summary_content += f"""
           <details>
           <summary><strong>🔻 Code Issues ({len(semgrep_data)})</strong></summary>
           
-          | File | Line | Message |
-          | :--- | :--- | :--- |
+          | File | Line | Rule Name | Message |
+          | :--- | :--- | :--- | :--- |
           """
               for s in semgrep_data:
                   path = s.get('path', '?')
                   line = s.get('start', {}).get('line', '?')
+                  rule_id = s.get('check_id', '?').split('.')[-1] # Shorten rule name
                   msg = s.get('extra', {}).get('message', '').replace('\n', ' ')
-                  summary_content += f"| `{path}` | {line} | {msg} |\n"
+                  summary_content += f"| `{path}` | {line} | `{rule_id}` | {msg} |\n"
               summary_content += "</details>\n\n"
 
-          # 3. Trivy Details
+          # 3. Trivy Details (Added Vulnerability Name/Title)
           if trivy_data:
               summary_content += f"""
           <details>
           <summary><strong>🔻 Vulnerable Dependencies ({len(trivy_data)})</strong></summary>
           
-          | Package | Severity | ID | Location |
+          | Package | Severity | Vuln Name | ID |
           | :--- | :--- | :--- | :--- |
           """
               for t in trivy_data:
-                  summary_content += f"| `{t['pkg']}` | **{t['severity']}** | {t['id']} | {t['target']} |\n"
+                  title = t['title'].replace('|', '-') # Sanitize for table
+                  summary_content += f"| `{t['pkg']}` | **{t['severity']}** | {title} | {t['id']} |\n"
               summary_content += "</details>\n"
 
           # Write to GitHub Summary
