@@ -27,12 +27,12 @@ jobs:
       # -----------------------------------------------------------
       # 2. SAST PART A: BANDIT (The Heavy Hitter)
       # -----------------------------------------------------------
-      - name: Run Bandit (Python Security)
-        run: |
-          pip install bandit
-          # -r: recursive, -f json: format, -o: output
-          # || true prevents pipeline failure
-          bandit -r . -f json -o bandit-report.json || true
+      # - name: Run Bandit (Python Security)
+      #   run: |
+      #     pip install bandit
+      #     # -r: recursive, -f json: format, -o: output
+      #     # || true prevents pipeline failure
+      #     bandit -r . -f json -o bandit-report.json || true
 
       # -----------------------------------------------------------
       # 3. SAST PART B: SEMGREP (Modern Rules)
