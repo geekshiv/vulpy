@@ -1,4 +1,4 @@
-name: DevSecOps Scan
+name: DevSecOps Scan (Dual Engine)
 
 on: [push, pull_request]
 
@@ -24,30 +24,27 @@ jobs:
           chmod +x gitleaks
           ./gitleaks detect -v --source . --report-path gitleaks-report.json --report-format json || true
 
-     # -----------------------------------------------------------
-      # 2. SAST SCAN (Semgrep - Aggressive Security Mode)
+      # -----------------------------------------------------------
+      # 2. SAST PART A: BANDIT (The Heavy Hitter)
+      # -----------------------------------------------------------
+      - name: Run Bandit (Python Security)
+        run: |
+          pip install bandit
+          # -r: recursive, -f json: format, -o: output
+          # || true prevents pipeline failure
+          bandit -r . -f json -o bandit-report.json || true
+
+      # -----------------------------------------------------------
+      # 3. SAST PART B: SEMGREP (Modern Rules)
       # -----------------------------------------------------------
       - name: Run Semgrep
         run: |
           pip install semgrep
-          
-          # We use multiple specific config sets to catch OWASP issues
-          # p/owasp-top-ten: Covers SQLi, XSS, Injection
-          # p/python-security: General python security patterns
-          # p/flask: Specific to Flask misconfigurations (CSRF, etc)
-          # p/secrets: Backup secret check
-          
-          echo "🏃 Running Semgrep with OWASP & Security Rulesets..."
-          
-          semgrep scan \
-            --config=p/owasp-top-ten \
-            --config=p/python-security \
-            --config=p/flask \
-            --config=p/bandit \
-            --json -o semgrep-report.json || true
-            
+          # We revert to 'p/default' + 'p/security-audit' for broad coverage
+          semgrep scan --config=p/default --config=p/security-audit --json -o semgrep-report.json || true
+
       # -----------------------------------------------------------
-      # 3. SCA SCAN (Trivy)
+      # 4. SCA SCAN (Trivy)
       # -----------------------------------------------------------
       - name: Install Trivy
         run: |
@@ -58,7 +55,7 @@ jobs:
           trivy fs . --format json --output trivy-report.json --exit-code 0
 
       # -----------------------------------------------------------
-      # 4. GENERATE DASHBOARD (With Severity)
+      # 5. GENERATE UNIFIED DASHBOARD
       # -----------------------------------------------------------
       - name: Generate Dashboard
         if: always()
@@ -69,24 +66,35 @@ jobs:
 
           summary_content = "# 🛡️ Security Scan Report\n\n"
           
-          # Initialize data
+          # --- LOAD DATA ---
           gitleaks_data = []
           semgrep_data = []
+          bandit_data = []
           trivy_data = []
 
-          # --- LOAD DATA ---
+          # 1. Gitleaks
           if os.path.exists("gitleaks-report.json"):
               try:
                   with open("gitleaks-report.json") as f:
                       gitleaks_data = json.load(f)
               except: pass
 
+          # 2. Semgrep
           if os.path.exists("semgrep-report.json"):
               try:
                   with open("semgrep-report.json") as f:
                       semgrep_data = json.load(f).get('results', [])
               except: pass
 
+          # 3. Bandit (New!)
+          if os.path.exists("bandit-report.json"):
+              try:
+                  with open("bandit-report.json") as f:
+                      data = json.load(f)
+                      bandit_data = data.get('results', [])
+              except: pass
+
+          # 4. Trivy
           if os.path.exists("trivy-report.json"):
               try:
                   with open("trivy-report.json") as f:
@@ -95,89 +103,82 @@ jobs:
                           for v in result.get('Vulnerabilities', []):
                               trivy_data.append({
                                   'pkg': v.get('PkgName', 'unknown'),
-                                  'version': v.get('InstalledVersion', '?'),
-                                  'id': v.get('VulnerabilityID', 'unknown'),
                                   'title': v.get('Title', 'No description available'),
                                   'severity': v.get('Severity', 'UNKNOWN'),
-                                  'target': result.get('Target', 'unknown')
+                                  'id': v.get('VulnerabilityID', 'unknown')
                               })
               except: pass
 
-          # --- HEADER ---
-          gl_count = len(gitleaks_data)
-          sg_count = len(semgrep_data)
-          tr_count = len(trivy_data)
+          # --- COMBINE SAST ---
+          total_sast_count = len(semgrep_data) + len(bandit_data)
           
-          gl_icon = "🔴" if gl_count > 0 else "✅"
-          sg_icon = "🟠" if sg_count > 0 else "✅"
-          tr_icon = "🟠" if tr_count > 0 else "✅"
+          # Icons
+          gl_icon = "🔴" if len(gitleaks_data) > 0 else "✅"
+          sast_icon = "🔴" if total_sast_count > 0 else "✅"
+          tr_icon = "🟠" if len(trivy_data) > 0 else "✅"
 
           summary_content += f"""
           | Category | Status | Issues |
           | :--- | :--- | :---: |
-          | **Secrets** | {gl_icon} | {gl_count} |
-          | **Code (SAST)** | {sg_icon} | {sg_count} |
-          | **Deps (SCA)** | {tr_icon} | {tr_count} |
+          | **Secrets** | {gl_icon} | {len(gitleaks_data)} |
+          | **Code (SAST)** | {sast_icon} | {total_sast_count} |
+          | **Deps (SCA)** | {tr_icon} | {len(trivy_data)} |
           
           ---
           """
 
-          # --- 1. GITLEAKS (Always Critical) ---
+          # --- SECTIONS ---
+
+          # GITLEAKS
           if gitleaks_data:
               summary_content += f"""
-          <details>
-          <summary><strong>🔻 Secrets Details ({gl_count})</strong></summary>
+          <details><summary><strong>🔻 Secrets Details ({len(gitleaks_data)})</strong></summary>
           
-          | Severity | File | Line | Variable | Type |
-          | :--- | :--- | :--- | :--- | :--- |
+          | Severity | File | Line | Variable |
+          | :--- | :--- | :--- | :--- |
           """
               for s in gitleaks_data:
                   raw_match = s.get('Match', '')
                   safe_match = (raw_match[:20] + '...') if len(raw_match) > 20 else raw_match
                   safe_match = safe_match.replace('|', '\|')
-                  
-                  # Secrets are always Critical
-                  summary_content += f"| **🔴 CRITICAL** | `{s.get('File', '?')}` | {s.get('StartLine', '?')} | `{safe_match}` | {s.get('RuleID', '?')} |\n"
+                  summary_content += f"| **🔴 CRITICAL** | `{s.get('File', '?')}` | {s.get('StartLine', '?')} | `{safe_match}` |\n"
               summary_content += "</details>\n\n"
 
-          # --- 2. SEMGREP (Dynamic Severity) ---
-          if semgrep_data:
+          # SAST (Combined Bandit + Semgrep)
+          if total_sast_count > 0:
               summary_content += f"""
-          <details>
-          <summary><strong>🔻 Code Issues ({sg_count})</strong></summary>
+          <details><summary><strong>🔻 Code Issues ({total_sast_count})</strong></summary>
           
-          | Severity | File | Line | Rule | Message |
+          | Tool | Severity | File | Line | Issue |
           | :--- | :--- | :--- | :--- | :--- |
           """
+              # Add Bandit Rows
+              for b in bandit_data:
+                  sev = b.get('issue_severity', 'MEDIUM')
+                  icon = "🔴" if sev == "HIGH" else "🟠"
+                  summary_content += f"| Bandit | **{icon} {sev}** | `{b.get('filename', '?')}` | {b.get('line_number', '?')} | {b.get('issue_text', '?')} |\n"
+
+              # Add Semgrep Rows
               for s in semgrep_data:
-                  path = s.get('path', '?')
-                  line = s.get('start', {}).get('line', '?')
-                  rule_id = s.get('check_id', '?').split('.')[-1]
+                  sev = s.get('extra', {}).get('severity', 'UNKNOWN')
+                  icon = "🔴" if sev == "ERROR" else "hk"
                   msg = s.get('extra', {}).get('message', '').replace('\n', ' ')
-                  
-                  # Map Severity
-                  raw_sev = s.get('extra', {}).get('severity', 'UNKNOWN')
-                  sev_icon = "🔴" if raw_sev == "ERROR" else "hk"
-                  
-                  summary_content += f"| **{sev_icon} {raw_sev}** | `{path}` | {line} | `{rule_id}` | {msg} |\n"
+                  summary_content += f"| Semgrep | **{icon} {sev}** | `{s.get('path', '?')}` | {s.get('start', {}).get('line', '?')} | {msg} |\n"
+              
               summary_content += "</details>\n\n"
 
-          # --- 3. TRIVY (Dynamic Severity) ---
+          # TRIVY
           if trivy_data:
               summary_content += f"""
-          <details>
-          <summary><strong>🔻 Vulnerable Dependencies ({tr_count})</strong></summary>
+          <details><summary><strong>🔻 Vulnerable Dependencies ({len(trivy_data)})</strong></summary>
           
           | Severity | Package | Vuln Name | ID |
           | :--- | :--- | :--- | :--- |
           """
               for t in trivy_data:
+                  icon = "🔴" if t['severity'] in ["CRITICAL", "HIGH"] else "hk"
                   title = t['title'].replace('|', '-')
-                  sev = t['severity']
-                  # Color coding for Trivy
-                  icon = "🔴" if sev in ["CRITICAL", "HIGH"] else "hk"
-                  
-                  summary_content += f"| **{icon} {sev}** | `{t['pkg']}` | {title} | {t['id']} |\n"
+                  summary_content += f"| **{icon} {t['severity']}** | `{t['pkg']}` | {title} | {t['id']} |\n"
               summary_content += "</details>\n"
 
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
