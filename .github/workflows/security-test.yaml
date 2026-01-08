@@ -37,7 +37,7 @@ jobs:
           # p/security-audit: Catches deep security flaws
           semgrep scan --config=p/default --config=p/security-audit --json -o semgrep-report.json || true
           
-          # Debug: Verify report exists and has data
+          # Debug: Verify report exists
           ls -lh semgrep-report.json
 
       # -----------------------------------------------------------
@@ -52,7 +52,7 @@ jobs:
           trivy fs . --format json --output trivy-report.json --exit-code 0
 
       # -----------------------------------------------------------
-      # 4. GENERATE DASHBOARD
+      # 4. GENERATE SORTED DASHBOARD
       # -----------------------------------------------------------
       - name: Generate Dashboard
         if: always()
@@ -106,7 +106,7 @@ jobs:
                   path = s.get('path', '?')
                   line = s.get('start', {}).get('line', '?')
                   
-                  # CLEAN NAME LOGIC (e.g., "Sql Injection")
+                  # CLEAN NAME
                   raw_id = s.get('check_id', '?').split('.')[-1]
                   clean_name = raw_id.replace('-', ' ').title()
                   
@@ -127,6 +127,13 @@ jobs:
 
           # --- PROCESS TRIVY ---
           trivy_criticals = [t for t in trivy_data if t['severity'] in ["CRITICAL", "HIGH"]]
+
+          # --- SORTING LOGIC ---
+          # 0 = Critical, 1 = High, 99 = Unknown. Criticals always float to top.
+          severity_order = {"CRITICAL": 0, "HIGH": 1}
+
+          sast_findings.sort(key=lambda x: severity_order.get(x['severity'], 99))
+          trivy_criticals.sort(key=lambda x: severity_order.get(x['severity'], 99))
 
           # --- BUILD HEADER ---
           gl_count = len(gitleaks_data)
