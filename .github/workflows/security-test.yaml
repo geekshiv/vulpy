@@ -1,4 +1,4 @@
-name: DevSecOps Scan 
+name: DevSecOps Scan
 
 on: [push, pull_request]
 
@@ -22,7 +22,6 @@ jobs:
           curl -sS -L https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz -o gitleaks.tar.gz
           tar -xf gitleaks.tar.gz gitleaks
           chmod +x gitleaks
-          # Generate JSON report
           ./gitleaks detect -v --source . --report-path gitleaks-report.json --report-format json || true
 
       # -----------------------------------------------------------
@@ -31,7 +30,6 @@ jobs:
       - name: Run Semgrep
         run: |
           pip install semgrep
-          # Output JSON for parsing
           semgrep scan --config=p/python --config=p/dockerfile --json -o semgrep-report.json || true
 
       # -----------------------------------------------------------
@@ -46,7 +44,7 @@ jobs:
           trivy fs . --format json --output trivy-report.json --exit-code 0
 
       # -----------------------------------------------------------
-      # 4. GENERATE DETAILED DASHBOARD
+      # 4. GENERATE DASHBOARD (With Severity)
       # -----------------------------------------------------------
       - name: Generate Dashboard
         if: always()
@@ -85,78 +83,88 @@ jobs:
                                   'pkg': v.get('PkgName', 'unknown'),
                                   'version': v.get('InstalledVersion', '?'),
                                   'id': v.get('VulnerabilityID', 'unknown'),
-                                  'title': v.get('Title', 'No description available'), # <--- Added Title
+                                  'title': v.get('Title', 'No description available'),
                                   'severity': v.get('Severity', 'UNKNOWN'),
                                   'target': result.get('Target', 'unknown')
                               })
               except: pass
 
-          # --- BUILD SUMMARY HEADER ---
-          gl_icon = "🔴" if len(gitleaks_data) > 0 else "✅"
-          sg_icon = "🟠" if len(semgrep_data) > 0 else "✅"
-          tr_icon = "🟠" if len(trivy_data) > 0 else "✅"
+          # --- HEADER ---
+          gl_count = len(gitleaks_data)
+          sg_count = len(semgrep_data)
+          tr_count = len(trivy_data)
+          
+          gl_icon = "🔴" if gl_count > 0 else "✅"
+          sg_icon = "🟠" if sg_count > 0 else "✅"
+          tr_icon = "🟠" if tr_count > 0 else "✅"
 
           summary_content += f"""
           | Category | Status | Issues |
           | :--- | :--- | :---: |
-          | **Secrets** | {gl_icon} | {len(gitleaks_data)} |
-          | **Code (SAST)** | {sg_icon} | {len(semgrep_data)} |
-          | **Deps (SCA)** | {tr_icon} | {len(trivy_data)} |
+          | **Secrets** | {gl_icon} | {gl_count} |
+          | **Code (SAST)** | {sg_icon} | {sg_count} |
+          | **Deps (SCA)** | {tr_icon} | {tr_count} |
           
           ---
           """
 
-          # --- BUILD EXPANDABLE TABLES ---
-          
-          # 1. Gitleaks Details (Added Match/Variable Column)
+          # --- 1. GITLEAKS (Always Critical) ---
           if gitleaks_data:
               summary_content += f"""
           <details>
-          <summary><strong>🔻 Secrets Details ({len(gitleaks_data)})</strong></summary>
+          <summary><strong>🔻 Secrets Details ({gl_count})</strong></summary>
           
-          | File | Line | Variable / Match | Type |
-          | :--- | :--- | :--- | :--- |
+          | Severity | File | Line | Variable | Type |
+          | :--- | :--- | :--- | :--- | :--- |
           """
               for s in gitleaks_data:
-                  # Safety: Truncate match to avoid printing full secret, but show enough to identify variable
                   raw_match = s.get('Match', '')
                   safe_match = (raw_match[:20] + '...') if len(raw_match) > 20 else raw_match
-                  safe_match = safe_match.replace('|', '\|') # Escape pipe for markdown table
+                  safe_match = safe_match.replace('|', '\|')
                   
-                  summary_content += f"| `{s.get('File', '?')}` | {s.get('StartLine', '?')} | `{safe_match}` | {s.get('RuleID', '?')} |\n"
+                  # Secrets are always Critical
+                  summary_content += f"| **🔴 CRITICAL** | `{s.get('File', '?')}` | {s.get('StartLine', '?')} | `{safe_match}` | {s.get('RuleID', '?')} |\n"
               summary_content += "</details>\n\n"
 
-          # 2. Semgrep Details (Added Rule Name)
+          # --- 2. SEMGREP (Dynamic Severity) ---
           if semgrep_data:
               summary_content += f"""
           <details>
-          <summary><strong>🔻 Code Issues ({len(semgrep_data)})</strong></summary>
+          <summary><strong>🔻 Code Issues ({sg_count})</strong></summary>
           
-          | File | Line | Rule Name | Message |
-          | :--- | :--- | :--- | :--- |
+          | Severity | File | Line | Rule | Message |
+          | :--- | :--- | :--- | :--- | :--- |
           """
               for s in semgrep_data:
                   path = s.get('path', '?')
                   line = s.get('start', {}).get('line', '?')
-                  rule_id = s.get('check_id', '?').split('.')[-1] # Shorten rule name
+                  rule_id = s.get('check_id', '?').split('.')[-1]
                   msg = s.get('extra', {}).get('message', '').replace('\n', ' ')
-                  summary_content += f"| `{path}` | {line} | `{rule_id}` | {msg} |\n"
+                  
+                  # Map Severity
+                  raw_sev = s.get('extra', {}).get('severity', 'UNKNOWN')
+                  sev_icon = "🔴" if raw_sev == "ERROR" else "hk"
+                  
+                  summary_content += f"| **{sev_icon} {raw_sev}** | `{path}` | {line} | `{rule_id}` | {msg} |\n"
               summary_content += "</details>\n\n"
 
-          # 3. Trivy Details (Added Vulnerability Name/Title)
+          # --- 3. TRIVY (Dynamic Severity) ---
           if trivy_data:
               summary_content += f"""
           <details>
-          <summary><strong>🔻 Vulnerable Dependencies ({len(trivy_data)})</strong></summary>
+          <summary><strong>🔻 Vulnerable Dependencies ({tr_count})</strong></summary>
           
-          | Package | Severity | Vuln Name | ID |
+          | Severity | Package | Vuln Name | ID |
           | :--- | :--- | :--- | :--- |
           """
               for t in trivy_data:
-                  title = t['title'].replace('|', '-') # Sanitize for table
-                  summary_content += f"| `{t['pkg']}` | **{t['severity']}** | {title} | {t['id']} |\n"
+                  title = t['title'].replace('|', '-')
+                  sev = t['severity']
+                  # Color coding for Trivy
+                  icon = "🔴" if sev in ["CRITICAL", "HIGH"] else "hk"
+                  
+                  summary_content += f"| **{icon} {sev}** | `{t['pkg']}` | {title} | {t['id']} |\n"
               summary_content += "</details>\n"
 
-          # Write to GitHub Summary
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(summary_content)
