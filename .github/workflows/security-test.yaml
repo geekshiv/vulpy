@@ -1,4 +1,4 @@
-name: DevSecOps Scan
+name: DevSecOps Scan 
 
 on: [push, pull_request]
 
@@ -27,11 +27,18 @@ jobs:
       # -----------------------------------------------------------
       # 2. SAST SCAN (Semgrep)
       # -----------------------------------------------------------
-      - name: Run Semgrep
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep Scan
         run: |
-          pip install semgrep
-          # Using specific rulesets to catch Flask/Python issues
-          semgrep scan --config=p/owasp-top-ten --config=p/python-security --config=p/flask --json -o semgrep-report.json || true
+          echo "🏃 Running Semgrep with Standard + Security Rules..."
+          # p/default: Catches standard bugs (like the SQLi in your screenshot)
+          # p/security-audit: Catches deep security flaws
+          semgrep scan --config=p/default --config=p/security-audit --json -o semgrep-report.json || true
+          
+          # Debug: Verify report exists and has data
+          ls -lh semgrep-report.json
 
       # -----------------------------------------------------------
       # 3. SCA SCAN (Trivy)
@@ -94,14 +101,12 @@ jobs:
           for s in semgrep_data:
               sev = s.get('extra', {}).get('severity', 'UNKNOWN')
               
-              # FILTER: Ignore INFO, keep ERROR and WARNING
+              # FILTER: Keep ERROR (Critical) and WARNING (High)
               if sev in ["ERROR", "WARNING"]:
                   path = s.get('path', '?')
                   line = s.get('start', {}).get('line', '?')
                   
-                  # CLEAN NAME LOGIC
-                  # Ex: python.flask.security.xss -> "Xss"
-                  # Ex: python.sqlalchemy.injection -> "Injection"
+                  # CLEAN NAME LOGIC (e.g., "Sql Injection")
                   raw_id = s.get('check_id', '?').split('.')[-1]
                   clean_name = raw_id.replace('-', ' ').title()
                   
@@ -109,7 +114,6 @@ jobs:
                   display_sev = "CRITICAL" if sev == "ERROR" else "HIGH"
                   icon = "🔴" if sev == "ERROR" else "🟠"
                   
-                  # Shorten message
                   msg = s.get('extra', {}).get('message', '').split('.')[0]
                   
                   sast_findings.append({
